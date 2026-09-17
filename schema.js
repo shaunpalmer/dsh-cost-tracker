@@ -1,118 +1,134 @@
 // ============================================================
-// DSH 花费统计插件 —— 极简 settings schema（零依赖）
+// DSH Cost Tracker - minimal zero-dependency settings schema.
 //
-// 背景：注册 `ctx.settings` 命名空间需要一个 schemastery 形状的 schema，
-// 但本插件不强制依赖任何 npm 包（DSH 宿主自带的 schemastery 也不保证可从
-// 本插件的解析路径加载）。实测该服务只依赖 schema 的三项能力：
+// Registering a ctx.settings namespace requires a schemastery-shaped object,
+// but this plugin intentionally has no required npm runtime dependencies. The
+// DSH host's own schemastery package is not guaranteed to resolve from this
+// package, so we implement only the three behaviours the host consumes:
 //
-//   1. 可调用：schema(rawValue) → 校验/归一化后的值（服务端 resolve() 会调用它）
-//   2. 每个节点带 `.meta`（`redactSecrets` 据此识别 role:'secret' 字段）
-//   3. `.toJSON()`（`describe()` 会序列化后发给浏览器，渲染配置卡片）
+// 1. A callable schema: schema(rawValue) -> normalized value.
+// 2. A .meta object on every node so secret fields can be redacted.
+// 3. A .toJSON() method so the settings description can be sent to the client.
 //
-// 因此这里用普通对象 + 函数自建同形状的 schema：既能被宿主消费，
-// 又不引入依赖。字段一律 `.default(undefined)`——只有用户在卡片里显式
-// 保存才写入用户层，从而不覆盖配置文件里的既有值。
+// Fields use .default(undefined) so only values explicitly saved by the user
+// enter the user settings layer; existing values in the plugin config file are
+// not silently overwritten.
 // ============================================================
 
-const TYPES = {};
+const TYPES = {}
 
 /**
- * 生成一个无类型限制的节点（接受任意 JSON 值，保留原样）。
- * @param {object} meta
+ * Create an unconstrained node that returns any JSON value unchanged.
+ *
+ * @param {object} meta Node metadata.
+ * @returns {Function} Schema node.
  */
 function anyNode(meta) {
-  const node = (v) => v;
-  node.meta = meta || {};
-  node.toJSON = () => ({ type: undefined, meta: node.meta });
+  const node = (value) => value
+  node.meta = meta || {}
+  node.toJSON = () => ({ type: undefined, meta: node.meta })
   return node
 }
 
-/** 归一化容器里的原始值：只保留 dict 中声明过的键 */
+/** Keep only keys declared by an object schema node. */
 function pick(node, raw) {
   if (raw === undefined || raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
-  const out = {}
-  for (const [k, child] of Object.entries(node.dict)) {
-    if (!(k in raw)) continue
-    const v = child(raw[k])
-    if (v !== undefined) out[k] = v
+  const output = {}
+
+  for (const [key, child] of Object.entries(node.dict)) {
+    if (!(key in raw)) continue
+    const value = child(raw[key])
+    if (value !== undefined) output[key] = value
   }
-  return out
+
+  return output
 }
 
 function makeNode(type, meta, extra) {
-  const node = (v) => {
-    if (type === 'object') return pick(node, v)
-    if (v === undefined) return undefined
+  const node = (value) => {
+    if (type === 'object') return pick(node, value)
+    if (value === undefined) return undefined
+
     if (type === 'number') {
-      const n = Number(v)
-      return Number.isFinite(n) ? n : undefined
+      const number = Number(value)
+      return Number.isFinite(number) ? number : undefined
     }
-    if (type === 'boolean') return typeof v === 'boolean' ? v : undefined
-    if (type === 'string') return typeof v === 'string' ? v : undefined
-    return v
+
+    if (type === 'boolean') return typeof value === 'boolean' ? value : undefined
+    if (type === 'string') return typeof value === 'string' ? value : undefined
+    return value
   }
+
   node.meta = meta || {}
   Object.assign(node, extra || {})
   node.toJSON = () => {
-    const out = { type, meta: node.meta }
+    const output = { type, meta: node.meta }
     if (node.dict) {
-      out.dict = {}
-      for (const [k, child] of Object.entries(node.dict)) out.dict[k] = child.toJSON()
+      output.dict = {}
+      for (const [key, child] of Object.entries(node.dict)) output.dict[key] = child.toJSON()
     }
-    return out
+    return output
   }
+
   return node
 }
 
 /**
- * 极简 schema 构造器（只用到了 object/string/number/boolean）。
- * 用法与 schemastery 一致：
- *   const S = defineSchema()
- *   S.object({ url: S.string().default(undefined), token: S.string().role('secret').default(undefined) })
+ * Build the small schema API used by this plugin.
+ *
+ * The fluent methods intentionally mirror the subset of schemastery that DSH
+ * expects: object, string, number, natural, boolean, role, default, and
+ * description.
  */
 export function defineSchema() {
-  const api = {
-    /** 对象容器：返回只含声明键的对象 */
+  return {
+    /** Object container that returns only declared keys. */
     object(dict) {
       const node = makeNode('object', { default: {} })
       node.dict = dict || {}
       return node
     },
+
     string() {
       const node = makeNode('string', {})
-      node.role = (r) => { node.meta.role = r; return node }
-      node.default = (d) => { node.meta.default = d; return node }
-      node.description = (d) => { node.meta.description = d; return node }
+      node.role = (role) => { node.meta.role = role; return node }
+      node.default = (value) => { node.meta.default = value; return node }
+      node.description = (description) => { node.meta.description = description; return node }
       return node
     },
+
     number() {
       const node = makeNode('number', {})
-      node.role = (r) => { node.meta.role = r; return node }
-      node.default = (d) => { node.meta.default = d; return node }
-      node.description = (d) => { node.meta.description = d; return node }
+      node.role = (role) => { node.meta.role = role; return node }
+      node.default = (value) => { node.meta.default = value; return node }
+      node.description = (description) => { node.meta.description = description; return node }
       return node
     },
-    /** 非负整数（步长 1，与 schemastery 的 natural 对齐） */
+
+    /** Non-negative integer with a step of one. */
     natural() {
       const node = makeNode('number', { step: 1, min: 0 })
-      node.default = (d) => { node.meta.default = d; return node }
-      node.description = (d) => { node.meta.description = d; return node }
+      node.default = (value) => { node.meta.default = value; return node }
+      node.description = (description) => { node.meta.description = description; return node }
       return node
     },
+
     boolean() {
       const node = makeNode('boolean', {})
-      node.default = (d) => { node.meta.default = d; return node }
-      node.description = (d) => { node.meta.description = d; return node }
+      node.default = (value) => { node.meta.default = value; return node }
+      node.description = (description) => { node.meta.description = description; return node }
       return node
     },
-    any() { return anyNode({}) },
+
+    any() {
+      return anyNode({})
+    },
   }
-  return api
 }
 
 export const Schema = defineSchema()
 
-/** 供测试断言：schema 形状是否符合宿主的三项要求 */
+/** Return the schema characteristics asserted by tests. */
 export function schemaShape(schema) {
   return {
     callable: typeof schema === 'function',

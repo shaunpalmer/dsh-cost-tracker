@@ -1,41 +1,39 @@
 // ============================================================
-// DSH 花费统计插件 —— 云端同步引擎（纯逻辑，可独立测试）
+// DSH Cost Tracker - cloud sync engine
 //
-// 契约见 dsh-cost-cloud 仓库的 docs/INGEST-API.md（syncVer = 1）。
-// 本模块只做四件事：
-//   1. 维护本机身份（machineId / deviceName）与同步游标（watermark）
-//   2. 按契约 §6 计算内容哈希 dedupKey（与服务端逐位一致）
-//   3. 组装增量载荷（明细 + 日汇总快照，附 absorbed 列表）
-//   4. 分类处理响应/错误并退避，**绝不阻塞本地记账**
+// Responsibilities:
+// 1. Maintain local device identity and sync watermark state.
+// 2. Compute content-hash deduplication keys compatible with the cloud API.
+// 3. Build incremental detail and daily-rollup payloads.
+// 4. Classify remote errors and back off without blocking local accounting.
 //
-// 设计取舍：
-//   · 游标只是省流量的优化；正确性由内容哈希兜底（游标丢失后全量重发是安全的）
-//   · 明细先发、快照后发：快照的 absorbed 声明会让服务端把这些明细移出统计
-//   · 任何异常都不抛出到调用方（除手动 runOnce 的诊断结果外）
+// Cloud sync is optional and privacy-first. It is disabled by default,
+// session identifiers are masked by default, and purpose metadata is omitted
+// unless the user explicitly enables it.
 // ============================================================
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-/** 本插件在云端看板里的 agent 标识 */
+/** Agent identifier used by the cloud dashboard. */
 export const SOURCE = 'dsh'
 export const SYNC_VERSION = 1
 const US = '\u001f'
 const DAY_MS = 86400000
 const MAX_BATCH_BYTES = 900 * 1024
+
 /**
- * 历史回填算法版本（记录在状态文件 `backfillVer` 里）。
- * 低于本值的部署，下一轮同步会做一次「水位归零 + 由旧到新全量补发」。
- *   1 = v1.8.4：已废弃 —— 多轮循环用服务端返回的水位（整体 MAX(client_seq)）
- *       推进游标，会一步跨过本批之后尚未补发的记录，回填只发一批就短路。
- *   2 = v1.8.5 起：游标只推进到**本批实际送达**的 maxClientSeq，多轮可覆盖全部。
+ * Historical backfill algorithm version stored in sync state.
+ * Version 2 advances the watermark only to the highest sequence actually sent
+ * in the current batch, preventing older unsent records from being skipped.
  */
 const BACKFILL_VER = 2
 
 // ------------------------------------------------------------
-// 共享设备身份（与其它 agent 的适配器共用同一份文件）
-//   目录可用 DSH_COST_HOME 覆盖（多 OS 用户想合并为同一台设备时指向共享路径）
+// Shared device identity
+// DSH_COST_HOME can override the directory when multiple environments should
+// intentionally share one device identity.
 // ------------------------------------------------------------
 export function dataDir(env) {
   const e = env || process.env
@@ -54,8 +52,19 @@ function defaultMachineId(env) {
   return createHash('sha256').update(host + '/' + user).digest('hex').slice(0, 16)
 }
 
+function ensurePrivateDir(dir) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+}
+
+function writePrivateJson(file, value) {
+  const tmp = file + '.tmp'
+  writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 })
+  renameSync(tmp, file)
+}
+
 /**
- * 读取（必要时创建）共享设备身份。
+ * Read or create the shared device identity.
+ *
  * @param {{env?:object, dir?:string}} [opts]
  * @returns {{v:number, machineId:string, machineName:string, nameLocked:boolean}}
  */
@@ -73,17 +82,19 @@ export function loadIdentity(opts) {
         nameLocked: parsed.nameLocked === true,
       }
     }
-  } catch (e) { /* 首次运行或文件损坏：重建 */ }
+  } catch (e) { /* First run or damaged file: rebuild below. */ }
+
   const id = {
     v: 1,
     machineId: defaultMachineId(env),
-    machineName: (env.COMPUTERNAME || env.HOSTNAME || 'DSH 设备'),
+    machineName: (env.COMPUTERNAME || env.HOSTNAME || 'DSH device'),
     nameLocked: false,
   }
+
   try {
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(file, JSON.stringify(id, null, 2), 'utf8')
-  } catch (e) { /* 只读环境：内存态继续工作 */ }
+    ensurePrivateDir(dir)
+    writeFileSync(file, JSON.stringify(id, null, 2), { encoding: 'utf8', mode: 0o600 })
+  } catch (e) { /* Read-only environments continue with in-memory identity. */ }
   return id
 }
 
@@ -91,11 +102,8 @@ export function saveIdentity(id, opts) {
   const env = (opts && opts.env) || process.env
   const dir = (opts && opts.dir) || dataDir(env)
   try {
-    mkdirSync(dir, { recursive: true })
-    const file = join(dir, 'device.json')
-    const tmp = file + '.tmp'
-    writeFileSync(tmp, JSON.stringify(id, null, 2), 'utf8')
-    renameSync(tmp, file)
+    ensurePrivateDir(dir)
+    writePrivateJson(join(dir, 'device.json'), id)
     return true
   } catch (e) {
     return false
@@ -103,7 +111,7 @@ export function saveIdentity(id, opts) {
 }
 
 // ------------------------------------------------------------
-// 契约 §6：去重键（必须与 dsh-cost-cloud 的实现逐位一致）
+// Deduplication keys
 // ------------------------------------------------------------
 function s(v) { return v === undefined || v === null ? '' : String(v).trim() }
 function i(v) { const n = Number(v); return Number.isFinite(n) ? Math.trunc(n) : 0 }
@@ -113,7 +121,7 @@ function cost6(v) {
   return String(Math.round(n * 1e6) / 1e6)
 }
 
-/** 明细记录的 canonical 串；provider/model 小写、字符串 trim、整数截断、费用 6 位最短表示 */
+/** Canonical detail string used for cloud deduplication. */
 export function detailCanonical(rec, resetEpoch) {
   const t = (rec && rec.tokens) || {}
   return [
@@ -125,7 +133,7 @@ export function detailCanonical(rec, resetEpoch) {
   ].join(US)
 }
 
-/** 日汇总快照的 canonical 串：身份只含 日 + 订阅口径 + provider + model（不含可变指标） */
+/** Canonical daily-rollup identity string. */
 export function rollupCanonical(entry) {
   return [
     'rollup:' + s(entry && entry.dayKey),
@@ -148,7 +156,7 @@ export function rollupKeyOf(entry) {
 }
 
 // ------------------------------------------------------------
-// 云端配置
+// Cloud configuration
 // ------------------------------------------------------------
 export function normalizeCloudConfig(raw) {
   const def = {
@@ -159,8 +167,8 @@ export function normalizeCloudConfig(raw) {
     deviceId: '',
     syncIntervalSec: 60,
     syncBatchSize: 500,
-    maskSessionId: false,
-    includePurpose: true,
+    maskSessionId: true,
+    includePurpose: false,
     syncRollups: true,
     syncSinceDays: 180,
     cloudView: 'local',
@@ -179,8 +187,8 @@ export function normalizeCloudConfig(raw) {
     deviceId: typeof raw.deviceId === 'string' ? raw.deviceId.trim().slice(0, 128) : '',
     syncIntervalSec: intIn(raw.syncIntervalSec, 15, 3600, def.syncIntervalSec),
     syncBatchSize: intIn(raw.syncBatchSize, 50, 2000, def.syncBatchSize),
-    maskSessionId: raw.maskSessionId === true,
-    includePurpose: raw.includePurpose !== false,
+    maskSessionId: raw.maskSessionId === undefined ? def.maskSessionId : raw.maskSessionId === true,
+    includePurpose: raw.includePurpose === true,
     syncRollups: raw.syncRollups !== false,
     syncSinceDays: intIn(raw.syncSinceDays, 0, 3650, def.syncSinceDays),
     cloudView: view,
@@ -191,7 +199,7 @@ export function normalizeCloudConfig(raw) {
 }
 
 // ------------------------------------------------------------
-// 同步状态（游标文件）
+// Sync state
 // ------------------------------------------------------------
 export function defaultSyncState() {
   return {
@@ -222,11 +230,8 @@ export function readSyncState(storageDir) {
 
 export function writeSyncState(storageDir, state) {
   try {
-    mkdirSync(storageDir, { recursive: true })
-    const file = syncStatePath(storageDir)
-    const tmp = file + '.tmp'
-    writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8')
-    renameSync(tmp, file)
+    ensurePrivateDir(storageDir)
+    writePrivateJson(syncStatePath(storageDir), state)
     return true
   } catch (e) {
     return false
@@ -234,36 +239,36 @@ export function writeSyncState(storageDir, state) {
 }
 
 // ------------------------------------------------------------
-// HTTP 辅助
+// HTTP helpers
 // ------------------------------------------------------------
 function classifyStatus(status, body) {
   if (status === 200 && body && body.ok) return { ok: true }
   const code = (body && body.code) || ''
   if (status === 401 || code === 'TOKEN_INVALID' || code === 'TOKEN_MISSING') {
-    return { ok: false, code: 'TOKEN_INVALID', needAuth: true, message: '云端令牌无效，请在插件配置里更新' }
+    return { ok: false, code: 'TOKEN_INVALID', needAuth: true, message: 'Cloud token is invalid; update it in plugin settings.' }
   }
   if (status === 403) {
-    return { ok: false, code, needAuth: false, message: (body && body.error) || '云端拒绝：设备被禁用或未开启自注册' }
+    return { ok: false, code, needAuth: false, message: (body && body.error) || 'Cloud access denied: the device is disabled or self-registration is unavailable.' }
   }
   if (status === 413 || code === 'BATCH_TOO_LARGE' || code === 'PAYLOAD_TOO_LARGE') {
-    return { ok: false, code: 'TOO_LARGE', shrink: true, message: '批次过大，已自动折半重试' }
+    return { ok: false, code: 'TOO_LARGE', shrink: true, message: 'Sync batch is too large; retrying with a smaller batch.' }
   }
   if (status === 400) {
-    return { ok: false, code, needAuth: false, fatal: true, message: (body && body.error) || '请求被云端拒绝（协议不匹配？）' }
+    return { ok: false, code, needAuth: false, fatal: true, message: (body && body.error) || 'Cloud rejected the request; check protocol compatibility.' }
   }
-  if (status === 429) return { ok: false, code: 'RATE_LIMITED', retry: true, retryAfterMs: (body && body.retryAfterMs) || 60000, message: '触发云端限流，稍后重试' }
-  if (status >= 500 || status === 0) return { ok: false, code: 'SERVER', retry: true, message: (body && body.error) || '云端暂时不可用' }
+  if (status === 429) return { ok: false, code: 'RATE_LIMITED', retry: true, retryAfterMs: (body && body.retryAfterMs) || 60000, message: 'Cloud rate limit reached; retrying later.' }
+  if (status >= 500 || status === 0) return { ok: false, code: 'SERVER', retry: true, message: (body && body.error) || 'Cloud service is temporarily unavailable.' }
   return { ok: false, code, needAuth: false, message: (body && body.error) || ('HTTP ' + status) }
 }
 
 // ------------------------------------------------------------
-// 同步引擎
+// Sync engine
 // ------------------------------------------------------------
 /**
  * @param {object} deps
- * @param {() => object} deps.getConfig - 返回规范化后的插件配置（含 cloud* 字段）
+ * @param {() => object} deps.getConfig Returns normalized plugin config.
  * @param {() => {details:Array, rollups:object, resetEpoch:number, storageDir:string, maxSeq:number}} deps.getSnapshot
- * @param {(patch:object) => void} [deps.setConfigField] - 回写配置（记录同步结果/身份）
+ * @param {(patch:object) => void} [deps.setConfigField] Writes sync results/identity back to config.
  * @param {typeof fetch} [deps.fetchFn]
  * @param {() => number} [deps.now]
  * @param {(msg:string) => void} [deps.log]
@@ -312,7 +317,7 @@ export function createSyncEngine(deps) {
     }
   }
 
-  /** 组装本批明细载荷 */
+  /** Build the next detail-record payload. */
   function buildRecordsPayload(cfg, st, limitOverride) {
     const snap = safeSnapshot()
     const details = Array.isArray(snap.details) ? snap.details : []
@@ -321,9 +326,7 @@ export function createSyncEngine(deps) {
     const cutoff = cfg.syncSinceDays > 0 ? now() - cfg.syncSinceDays * DAY_MS : 0
     const out = []
     let bytes = 0
-    // 必须**由旧到新**收集：水位语义是"已成功上送的最大 seq"，
-    // 若从最新往回取批，首批只覆盖最新 limit 条，水位随即跳过更旧的记录，
-    // 它们就再也不会被选中（历史数据永久缺失）。
+
     for (let k = 0; k < details.length; k += 1) {
       const r = details[k]
       if (!r || typeof r.ts !== 'number') continue
@@ -349,7 +352,6 @@ export function createSyncEngine(deps) {
         subscription: r.subscription === true,
         period: r.period || 'flat',
       }
-      // 去重键按**原始记录**计算（服务端也按原始字段算），脱敏只影响上送字段
       rec.dedupKey = dedupKeyOf(r, resetEpoch)
       const size = JSON.stringify(rec).length
       if (out.length > 0 && (out.length >= limit || bytes + size > MAX_BATCH_BYTES)) break
@@ -357,7 +359,7 @@ export function createSyncEngine(deps) {
       bytes += size
       if (out.length >= limit) break
     }
-    // details 本身按时间升序，顺序收集即为升序上送（便于服务端推进水位）
+
     return {
       records: out,
       maxClientSeq: out.length ? Math.max(...out.map((r) => Number(r.seq) || 0)) : 0,
@@ -365,7 +367,7 @@ export function createSyncEngine(deps) {
     }
   }
 
-  /** 组装待上报的日汇总快照（含 absorbed 明细键） */
+  /** Build daily-rollup snapshots that have changed since the last sync. */
   function buildRollupsPayload(cfg, st) {
     const snap = safeSnapshot()
     const rollups = snap.rollups || {}
@@ -377,7 +379,6 @@ export function createSyncEngine(deps) {
         if (!e) continue
         const key = rollupKeyOf({ dayKey: day, provider: e.provider, model: e.model, subscription: e.subscription })
         const prev = sent[key]
-        // 快照只增不减：calls / cost 与前次相同则无需再传
         if (prev && Number(prev.calls) >= Number(e.calls) && Number(prev.cost) >= Number(e.cost)) continue
         out.push({
           key,
@@ -398,7 +399,6 @@ export function createSyncEngine(deps) {
             peak: Number(e.peak) || 0,
             off: Number(e.off) || 0,
             flat: Number(e.flat) || 0,
-            // 被折叠进本快照的明细键：服务端据此把它们移出统计（避免与快照重复计数）
             absorbed: Array.isArray(e.absorbed) ? e.absorbed.slice(0, 5000) : [],
           },
         })
@@ -409,8 +409,6 @@ export function createSyncEngine(deps) {
     return out
   }
 
-  function pad2(n) { return n < 10 ? '0' + n : '' + n }
-
   async function postJson(url, token, payload, timeoutMs) {
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(), timeoutMs || 15000)
@@ -420,13 +418,17 @@ export function createSyncEngine(deps) {
       try { body = await res.json() } catch (e) { body = null }
       return { status: res.status, body }
     } catch (e) {
-      return { status: 0, body: null, error: String((e && e.message) || e) }
+      const transportError = String((e && e.message) || e)
+      return {
+        status: 0,
+        body: { ok: false, error: 'Cloud service is temporarily unavailable: ' + transportError },
+        error: transportError,
+      }
     } finally {
       clearTimeout(timer)
     }
   }
 
-  /** 解析设备身份：优先令牌归属，其次自注册，最后用本机 machineId */
   async function ensureDevice(cfg, st) {
     const id = identityOf()
     const deviceId = cfg.deviceId || id.machineId
@@ -434,35 +436,29 @@ export function createSyncEngine(deps) {
     return deviceId
   }
 
-  /** 单次同步（手动或定时触发） */
   async function runOnce(opts) {
     const manual = !!(opts && opts.manual)
     const full = !!(opts && opts.full)
     const cfg = normalizeCloudConfig(getConfig())
     const result = { ok: false, skipped: true, accepted: 0, duplicates: 0, rollups: 0, error: '', needAuth: false, at: now() }
     if (!cfg.cloudEnabled || !cfg.cloudUrl) {
-      result.error = '未启用云端同步或未填写服务地址'
+      result.error = 'Cloud sync is disabled or no service URL is configured.'
       return result
     }
     if (!cfg.cloudToken) {
-      result.error = '未填写云端令牌'
+      result.error = 'No cloud token is configured.'
       result.needAuth = true
       return result
     }
     if (running) {
-      result.error = '上一次同步仍在进行'
+      result.error = 'A previous sync is still running.'
       return result
     }
+
     running = true
     try {
       const st = readSyncState(safeSnapshot().storageDir || process.cwd())
       if (full) { st.watermark = 0; st.legacySent = false; st.backfillVer = 0 }
-      // 一次性历史回填：≤1.8.3 的取批方向是"最新优先"，首批传完水位就跳到了最新
-      // seq，更旧的记录被 `seq <= watermark` 永久跳过（云端因此缺一段历史）。
-      // 这里在升级后的第一轮同步把水位归零、由旧到新把全部历史补齐一次；
-      // 服务端按内容哈希幂等，重复的记录只会被计为 duplicates。
-      // 用 backfillVer 而不是布尔量：v1.8.4 的回填算法本身有缺陷（见常量注释），
-      // 必须让已经跑过 v1 回填的部署再补跑一次 v2。
       const backfill = Number(st.backfillVer) !== BACKFILL_VER
       if (backfill) st.watermark = 0
       st.deviceId = await ensureDevice(cfg, st)
@@ -473,7 +469,6 @@ export function createSyncEngine(deps) {
       const id = identityOf()
       const base = cfg.cloudUrl
 
-      // ---- 1. 明细（先发） ----
       let pending = buildRecordsPayload(cfg, st, cfg.syncBatchSize)
       let sentRecords = 0
       let round = 0
@@ -496,12 +491,11 @@ export function createSyncEngine(deps) {
         const cls = classifyStatus(r.status, r.body)
         if (!cls.ok) {
           if (cls.shrink && pending.records.length > 1) {
-            // 批次过大：折半重试
             const half = Math.max(1, Math.floor(pending.records.length / 2))
             pending = buildRecordsPayload(cfg, st, half)
             continue
           }
-          throw Object.assign(new Error(cls.message || '上报失败'), { needAuth: cls.needAuth, retryAfterMs: cls.retryAfterMs, fatal: cls.fatal })
+          throw Object.assign(new Error(cls.message || 'Cloud upload failed.'), { needAuth: cls.needAuth, retryAfterMs: cls.retryAfterMs, fatal: cls.fatal })
         }
         const accepted = Number(r.body.accepted) || 0
         const dup = Number(r.body.duplicates) || 0
@@ -512,26 +506,19 @@ export function createSyncEngine(deps) {
         result.duplicates += dup
         result.updated = (result.updated || 0) + updated
         result.invalid = (result.invalid || 0) + invalid
-        // 游标只推进到**本批实际送达**的最大 seq。
-        // 服务端回的是它库里该设备明细的 MAX(client_seq)（可能含更早已上传的、
-        // 序号更高的记录），直接采信会一步跨过本批之后尚未补发的记录，
-        // 让下面的多轮循环当场 break —— 那正是历史缺口补不回来的原因。
         if (accepted + dup + updated > 0) {
           if (pending.maxClientSeq > st.watermark) st.watermark = pending.maxClientSeq
         } else if (invalid > 0) {
-          throw Object.assign(new Error('云端拒绝了本批全部 ' + invalid + ' 条记录'), { fatal: true })
+          throw Object.assign(new Error('Cloud rejected all ' + invalid + ' records in this batch.'), { fatal: true })
         }
         const next = buildRecordsPayload(cfg, st, cfg.syncBatchSize)
         if (!next.records.length || next.maxClientSeq <= pending.maxClientSeq) break
         pending = next
       }
       result.sentRecords = sentRecords
-      // 明细已由旧到新走完一轮（或达到轮次上限，水位同样可精确续传）→ 历史已对齐。
-      // 只在真正跑完明细阶段后落版本号：中途失败时保持旧值，下次仍会从头补，绝不漏发。
       st.legacySent = true
       st.backfillVer = BACKFILL_VER
 
-      // ---- 2. 日汇总快照（后发，声明 absorbed） ----
       if (cfg.syncRollups) {
         const snaps = buildRollupsPayload(cfg, st)
         for (let k = 0; k < snaps.length; k += 100) {
@@ -549,7 +536,7 @@ export function createSyncEngine(deps) {
           }
           const r = await postJson(base + '/api/v1/ingest/rollups', cfg.cloudToken, payload)
           const cls = classifyStatus(r.status, r.body)
-          if (!cls.ok) throw Object.assign(new Error(cls.message || '快照上报失败'), { needAuth: cls.needAuth, retryAfterMs: cls.retryAfterMs, fatal: cls.fatal })
+          if (!cls.ok) throw Object.assign(new Error(cls.message || 'Rollup upload failed.'), { needAuth: cls.needAuth, retryAfterMs: cls.retryAfterMs, fatal: cls.fatal })
           result.rollups += Number(r.body.rollupsUpserted) || 0
           for (const item of chunk) {
             const at = r.body && r.body.watermark ? r.body.watermark.lastAcceptedAt : now()
@@ -558,7 +545,6 @@ export function createSyncEngine(deps) {
         }
       }
 
-      // ---- 3. 成功：重置退避 ----
       st.lastSyncAt = now()
       st.lastOkAt = now()
       st.lastError = ''
@@ -593,19 +579,18 @@ export function createSyncEngine(deps) {
     }
   }
 
-  /** 测试连接：GET /health 并核对协议版本 */
   async function testConnection(cfgOverride) {
     const cfg = normalizeCloudConfig(cfgOverride || getConfig())
-    if (!cfg.cloudUrl) return { ok: false, error: '未填写服务地址' }
+    if (!cfg.cloudUrl) return { ok: false, error: 'No service URL is configured.' }
     try {
       const res = await fetchFn(cfg.cloudUrl + '/api/v1/health', { method: 'GET' })
       const body = await res.json().catch(() => null)
-      if (!body || body.ok !== true) return { ok: false, error: 'HTTP ' + res.status + '：服务端未就绪' }
+      if (!body || body.ok !== true) return { ok: false, error: 'HTTP ' + res.status + ': service is not ready.' }
       if (Number(body.syncVer) !== SYNC_VERSION) {
-        return { ok: false, error: '协议版本不匹配：插件 syncVer=' + SYNC_VERSION + '，服务端 syncVer=' + body.syncVer }
+        return { ok: false, error: 'Protocol version mismatch: plugin syncVer=' + SYNC_VERSION + ', server syncVer=' + body.syncVer }
       }
       if (Number(body.minSyncVer) > SYNC_VERSION) {
-        return { ok: false, error: '服务端要求 syncVer ≥ ' + body.minSyncVer + '，请升级插件' }
+        return { ok: false, error: 'Server requires syncVer >= ' + body.minSyncVer + '; update the plugin.' }
       }
       return {
         ok: true,
@@ -618,7 +603,6 @@ export function createSyncEngine(deps) {
     }
   }
 
-  /** 同步状态（供 UI 展示） */
   function status() {
     const cfg = normalizeCloudConfig(getConfig())
     const st = readSyncState(safeSnapshot().storageDir || process.cwd())
@@ -655,6 +639,6 @@ export function createSyncEngine(deps) {
   return { runOnce, status, testConnection, loadIdentity: identityOf, _buildRecordsPayload: buildRecordsPayload, _buildRollupsPayload: buildRollupsPayload }
 }
 
-/** 插件版本（编译期由 index.js 注入或读 package.json，缺省视为未知） */
+/** Plugin version injected by index.js; defaults to dev when unknown. */
 export let PLUGIN_VERSION = 'dev'
 export function setPluginVersion(v) { PLUGIN_VERSION = String(v || 'dev') }

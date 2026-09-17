@@ -1,341 +1,46 @@
-# 更新记录
+# Changelog
 
-本文件用中文记录 dsh-cost-tracker 的版本变更。
+All notable changes to the Project Studios fork are recorded here.
 
-## v1.8.8(2026-09-15)
+The original upstream repository contains the pre-fork release history. This fork began from upstream commit `65bfdb57da16f9963ac63d34c6b4098dc3535d17` at upstream version `1.8.8`.
 
-**修复：「仅云端」视图只有请求次数、费用整列为 ¥0.0000（字段名未映射）**
+## 1.8.8-ps.2 - 2026-09-17
 
-- **现场**：看板切到「仅云端」后，三张金额卡与底部汇总全为 `¥0.0000`，而「API 请求次数 / Tokens」正常（如 4,271 次、712.6M）。这个「次数对、金额 0」的组合直接指向字段名不匹配。
-- **根因**：云端 `/api/v1/overview` 的按量金额字段是 **`realCost`**、订阅等效是 **`subEquivalent`**，而本地 `buildDashboard` 与所有卡片读的是 **`real` / `sub`**。客户端的 `normalizeCloudDash`（与内联兜底 `vNormalizeCloudDash`）当时只把 `today/month/all` 原样透传，`summary` 更是整个丢掉 —— 于是金额全 0，`calls/tokens` 因两边同名而幸存。**测试里那份云端假数据误用了 `real/sub`，把缺陷掩盖了**（已改为与线上一致的 `realCost` 形状）。
-- **修法**：`view.js` 新增 `cloudSlices()` 做**逐项字段映射**（同时接受 `realCost/real`、`subCost/subEquivalent/sub` 三种写法，向后兼容旧云端），客户端内联兜底同步实现；`summary` 行按 `realCost → real`、`subEquivalent → sub` 映射，缺字段时回退到 `all` 的对应值。归一化后同时保证 `real + sub` 与 `calls + subCalls` 口径与本地一致。
+### Added
 
-**新增：云端「插件形状」只读接口，仅云端的图表不再为空**
+- New Zealand dollar display for dashboard spend, DeepSeek balance, recent records, and current-conversation cost.
+- A cached daily CNY→NZD reference-rate lookup using Frankfurter's public exchange-rate API.
+- Safe fallback to the original CNY display when a fresh or cached FX rate is unavailable.
 
-- 客户端要画消费柱状图、分模型明细与最近记录，需要 `byDay / byModel / byModelDay / recent`，而 `/api/v1/overview` 只给概览卡片 —— 「仅云端」的图表此前注定为空。
-- 云端新增 **`GET /api/v1/plugin-view`**（设备令牌可读，`caps.devicePluginView=true` 声明），字段名与本地 `buildDashboard` **逐项一致**，从根上消除这层适配；同时支持 `union` 并集（「本机+云端」）。
-- 插件探测 `/api/v1/health` 的 caps 后**优先走 plugin-view**，旧云端自动回退 `overview`（卡片可用、图表为空，不再整体不可用）；带 `union` 时仍走 overview（其卡片保持全网口径，与并集相加语义一致）。
-- 顺带修掉云端既有的**同源缺陷**：`pluginView()` 的 today/month/all 原取自 `totalsUnfiltered`（无条件下全表），会**绕过 `excludeDevice`** —— 「本机+云端」相加时本机被计入两次。现改为按同一过滤条件取切片，且 `calls/tokens` 只含按量、订阅另计（`subCalls/subTokens`），与本地口径对齐。
+### Accounting behavior
 
-**测试**
+- CNY remains the canonical stored and calculated currency. Historical records are not rewritten when exchange rates move.
+- NZD conversion happens only in the browser display layer.
+- The last valid rate is cached locally for 24 hours; an older cached rate may be used if the rate service is temporarily unavailable and is labelled as cached in the dashboard note.
+- The FX request contains only the currency pair and sends no cost records, session identifiers, project metadata, or DeepSeek credentials.
 
-- 插件 `test/client-render.test.js` 的云端假数据改为**线上真实形状**，新增 `[5] 仅云端金额映射`用例：断言今日 ¥0.50、总花费 ¥2.00、不再出现 `¥0.0000`、汇总行按 `realCost` 口径，且内联兜底与 `view.js` 结果逐字一致。
-- 新增 `test/cloud-view-e2e.test.js`：真实启动 `dsh-cost-cloud` 实例 → 设备令牌读 `plugin-view` → 过 `view.js` 归一化 → 断言卡片字段（含向后兼容旧概览口径）。
-- 新增 `test/cloud-read.test.js` 契约断言：概览优先 plugin-view、并集仍走 overview、不得回退到 `/api/admin`。
-- 云端新增 `test/plugin-view.test.js`（6 项）：caps 声明、字段形状、三切片受过滤约束、union 不重复计数、鉴权与开关、`range=all` 日期轴覆盖数据起点。
+## 1.8.8-ps.1 - 2026-09-17
 
-**兼容**：无数据格式变更。云端需部署 **1.2.0** 及以上才有 `plugin-view`（未部署时插件自动回退，金额修复本身不依赖云端升级）。
+### Added
 
-## v1.8.7(2026-09-15)
+- Project Studios package identity: `@shaunpalmer/dsh-cost-tracker`.
+- Hardened host wrapper (`index.safe.js`).
+- Project Studios hardening documentation and regression checks.
 
-**修复：`cost_recompute` 的默认范围只覆盖「最近一个价格时代」，更早的陈旧记录被静默跳过**
+### Security and privacy
 
-- **现场**：v1.8.6 修复后按提示执行补账，854 条被订正，但另有 **750 条 `deepseek-flash` 记录（seq 611–1360，北京时间 09-10 21:24 ～ 09-14 02:36）仍标着「估算」**。逐条核对发现它们**完全落在默认扫描范围之外**：旧默认 `since` = **最近一个价格时代的生效时刻**（本机为 `v41pro` = 09-14 12:00），该时刻之前的记录一条都没进扫描。补账只做了一半，提示却是「没有需要重算的记录」——**默认值本身就是陷阱**。
-- **修法**：默认改为 **全时段扫描（`since = 0`）**。补账幂等、明细量级有限（本机 1600+ 条耗时毫秒级），全扫代价可忽略，收益是「调用一次必然覆盖全部历史」。
-  - 显式传入 `since`（ISO 或 epoch ms）仍可限定时段；`since: 0` 现在被正确识别为「全时段」，此前因 `> 0` 判断会被当成缺省值而回落到最近时代。
-  - `since === 0` 时返回值 `era` 为 `null`（全时段不存在单一时代），避免旧版误报 `era=legacy`；工具输出把范围显示为「全时段」。
-- **实测（本机 2231 条明细）**：全时段扫描 `scanned=1642 / changed=772 / estimatedFlips=750 / delta=0.0000`，落盘后再跑一次 `changed=0`（幂等）。**全部 1643 条 `deepseek-flash` 记录的「估算」标记清零，金额一分未变**；仅剩 5 条 `k3-256k`（Kimi 订阅等效口径，本就应为估算）。
+- Prevent the upstream nav-icon routine from locating and modifying installed DSH UI files when this fork is loaded through its package entrypoint.
+- Keep cloud sync disabled by default.
+- Hash session identifiers by default if cloud sync is deliberately enabled.
+- Require explicit opt-in before project/purpose metadata is uploaded.
+- Write local cost records with owner-only file permissions and create their storage directory as owner-only on POSIX systems.
 
-**加固**
+### Changed
 
-- `test/client-registration.test.js` 新增 **[7] 版本号一致性**断言：`package.json` 的 `version` 必须等于 `index.js` 的 `PLUGIN_VERSION`。v1.8.6 发布时两处曾漂移（包 1.8.6 / 常量 1.8.5），而该常量会随上报信封发给云端用于排查设备版本，漂移会让云端看到错误版本。现已把它变成发布闸门。
-- `test/recompute.test.js` 断言默认范围改为「全时段扫描 + `era=null` + 覆盖全部 5 条样本」。
+- Replaced the large upstream browser client with a compact English `client.js`.
+- The primary README now documents the hardened fork in English.
+- The optional upstream settings-schema surface is suppressed by the hardened wrapper to avoid duplicate configuration surfaces while the fork is reduced.
 
-**兼容**：无数据格式变更；`cost_recompute` 入参向后兼容（显式 `since` 行为不变，仅缺省值与 `since: 0` 的解析被修正）。
+### Preserved
 
-## v1.8.6(2026-09-15)
-
-**修复：计费规则与 DeepSeek 官方定价的两处口径偏差（金额口径 + 标记口径）**
-
-核查基准：官方价格卡 <https://api-docs.deepseek.com/zh-cn/quick_start/pricing> 与发布通告 <https://api-docs.deepseek.com/zh-cn/news/news260910>。核查方法：用独立脚本按官方牌价重算全部已入库记录，与插件记账逐条比对（1985 条记录金额差额 `0.000000`，说明**数值本来就是对的一分不差**；以下两处修复的是口径与标记）。
-
-- **V4-Pro 路由生效时刻提前了 4 天（金额口径，会低估花费）**
-  - 旧实现把 `deepseek-v4-pro → V4.1 Flash` 的路由与 Flash 调价合并成同一时刻（北京时间 2026-09-10 12:00），但官方通告的措辞是：「北京时间 **2026 年 9 月 14 日 12:00** 之后……用户访问 `deepseek-v4-pro` 的请求将全部路由到 V4.1 Flash，并按 V4.1 Flash 单价计费」（价格卡脚注 (2) 同口径）。
-  - 影响：2026-09-10 12:00 ～ 09-14 12:00 之间的 V4-Pro 调用会被**低估约 4.5 倍**（9/27/0.30 → 2/8/0.04）。本机记录该窗口内无 V4-Pro 调用，故无历史金额损失，但属潜伏缺陷。
-  - 修法：新增 `V41_PRO_ROUTE_AT`（`2026-09-14T04:00:00Z`）与时代 `v41pro`，把路由从 `v41` 拆出来；`v41` 时代保留 V4-Pro 自有牌价（9/27/0.30），避免这 4 天落入 provider 兜底而被误标「估算」。
-
-- **官方现役模型名 `deepseek-flash` 不在精确单价表内（标记口径，已在真实数据中触发）**
-  - 官方脚注 (1)：「模型名请使用 `deepseek-flash`」。旧实现的规范名是 `deepseek-v4.1-flash`（官方文档中并不可调用的写法），于是宿主实际上报的 `deepseek-flash` 落入 provider 兜底分支——**金额恰好相同，但被标记为「估算」**。本机 1402 条 `deepseek-flash` 记录 100% 命中该问题，云端 `cost_basis` 也随之为 `estimated`，污染「估算占比 / 口径漂移」统计。
-  - 修法：`V41_FLASH_MODEL` 改为 `deepseek-flash`（官方现役名），并新增 `MODEL_ALIASES` 别名归一表，使 `deepseek-v4.1-flash` / `deepseek-v4-1-flash` / `deepseek-v41-flash` / `deepseek_flash` 等等价写法解析到同一规范名（单价表本身不重复列项）。路由目标与入账名统一为 `deepseek-flash`。
-
-**修复：`cost_recompute` 不再漏判「仅标记变化」的记录**
-- 变更判定此前只看费用 / 模型名 / 档位，于是「模型名从兜底升为精确档、金额分毫不变」的记录不会被订正。现纳入 `estimated` / `subscription` 标记比对，返回值新增 `estimatedFlips` 计数，工具输出会明确写出「其中 N 条仅订正『估算』标记，金额不变」，避免补账看起来「改了 0 条」。
-
-**变更**
-- `export const V41_FLASH_MODEL = 'deepseek-flash'`（原 `'deepseek-v4.1-flash'`）；新增导出 `V41_PRO_ROUTE_AT` / `MODEL_ALIASES`。
-- `PRICE_ERAS` 由 2 版增至 3 版：`legacy` / `v41`（09-10 12:00 起，含 V4-Pro 自有牌价）/ `v41pro`（09-14 12:00 起，含 V4-Pro 路由）；`v41` 时代新增 `proRouteSince` 说明字段。
-- `cost_prices` 的 `eras` / 渲染文本同步展示 V4-Pro 路由时刻与官方现役名口径。
-
-**测试**
-- `test/pricing.test.js`：新增 V4-Pro 路由时刻边界用例（`12:00:00.000` 前一毫秒仍按自有牌价、整点起路由）、`deepseek-flash` 精确命中与别名归一用例。
-- `test/recompute.test.js`：补账样本改为覆盖「路由前窗口金额不变」「路由后改写为 `deepseek-flash`」「误标估算记录被订正」三类，新增 `estimatedFlips` 断言。
-
-**计费影响**
-- **已入库记录金额零变化**（数值本即正确）；仅 `estimated` 标记、V4-Pro 在 9/10–9/14 窗口的口径、以及历史 `deepseek-v4.1-flash` 记录（本机 22 条）与 `deepseek-flash` 的桶名归并发生变化。
-- 涉及历史桶名/标记的机器建议执行一次 `cost_recompute`（默认试算，`apply: true` 落盘），幂等可重复执行。
-
-## v1.8.5(2026-09-15)
-
-**修复**
-- **v1.8.4 的自动回填会中途短路,只补一批就宣告完成**:`runOnce` 推进游标时采信的是**服务端返回的水位**,而服务端 `/api/v1/ingest/records` 回的是它库里该设备明细的 `MAX(client_seq)` —— **整体最大值**,含更早已上传、序号更高的记录,不是"本批"的最大值。于是在**它本来要修的那个场景**里(本机缺 1..723、云端已有 724..1457):第一轮补发 1..500 后服务端回 `maxClientSeq=1457`,游标一步跨到顶,下一批为空,`break` —— 501..723 照样补不回来。现改为游标只推进到**本批实际送达**的 `maxClientSeq`,多轮循环才能真正逐段覆盖全部历史。实测现场:17:16 那次回填只发出 1 批 500 条,预期的 3 批只完成 1 批。
-- **回填算法加版本号**:状态文件新增 `backfillVer`。v1.8.4 已经跑过(有缺陷的)回填的部署,`legacySent` 已是 `true` 而缺口仍在,靠布尔量无法区分"补过且补全"与"补过但短路"。现在低于当前算法版本(2)的部署会**再补跑一次**;`cost_sync action=now full=true` 同样会强制重新回填一轮。
-
-**测试**
-- `test/sync.test.js` 新增 8d 组:复现「服务端水位 = 整体最大值 + 云端只有最新的 500 条」这一真实故障现场,断言一轮同步必须把 1..1200 全部送达、云端不留空洞、版本号落盘。**该组在 v1.8.4 代码上报 5 条红**(只发出第一批、留下 650 个空洞),修复后全绿。
-- 断言回填成功后必须落 `backfillVer=2`,中途失败时不得落(否则缺口会被永久放过)。全量 `npm test` 通过;无数据迁移、无破坏性变更。
-
-## v1.8.4(2026-09-15)
-
-**修复**
-- **云端「全时段」缺失最早一段历史**:`sync.js` 的 `buildRecordsPayload()` 从**最新**记录往回取批,首批装满 `syncBatchSize`(默认 500)后水位立刻跳到最新 seq,而跳过条件是 `seq <= watermark` —— 比首批更旧的记录被判成"已上报",**再也不会被发送**。凡是"先攒下一批本地明细、之后才开启云端同步"的部署都会中招,且 `cost_sync action=now full=true` 也救不回来:全量只是把水位归零,选片方向照旧从最新开始,重复发同一批后水位又跳回顶端。实测现场:本机 1456 条明细,云端只收到 722 条(最早 `2026-08-24 22:53:57`,正好是首轮 500 条批次的起点),**缺 723 条、¥36.68**。现改为**由旧到新**取批,水位逐批连续推进,每轮最多 40 批,多轮即可覆盖全部历史。
-- **已上线部署自动补齐**:启用状态文件里一直闲置的 `legacySent` 标记做**一次性历史回填** —— 升级后的第一轮同步把水位归零、由旧到新重发全部历史(服务端按内容哈希幂等,已存在的记录只计 `duplicates`);该标记**只在明细阶段真正跑完一轮后才置位**,中途失败保持 `false`,下次同步继续补,绝不漏发。
-
-**测试**
-- `test/sync.test.js` 新增 3 组护栏共 21 条断言:
-  - **取片方向**:批上限截断时必须取**最旧**的若干条(≤1.8.3 返回最新的,断言立即报红);
-  - **现场复现**:1200 条明细 + 水位被推到 1100 + `legacySent=false`,一轮同步必须完整送达 1200 条(升序、无重复、水位推进到 1200、置位 `legacySent`);置位后只发增量;
-  - **失败可恢复**:中途 500 时不得置位 `legacySent`,下一次同步仍能把 1200 条全部补齐。
-- 上述 11 条断言在 v1.8.3 代码上全部报红,修复后全绿;全量 `npm test` 通过;无数据迁移、无破坏性变更。
-
-## v1.8.3(2026-09-15)
-
-**修复**
-- **三态视图在浏览器里从未生效**:`client.js` 通过 `requireLocal("./view", 兜底桩)` 取三视图与云端合并逻辑,而宿主的客户端模块加载器**只加载本插件的客户端 bundle** —— `view.js` 是宿主侧 ESM,浏览器里永远取不到,于是静默退回只含「本机」的空桩:**三态开关只剩一个按钮**,而且 `normalizeCloudDash` / `mergeDash` 被空实现顶掉,**云端数据即便取回来也永远合并不进来**(这是「只有本机这个选项」的直接原因)。现把 view.js 的纯逻辑**完整内联**进 bundle(保留 `require("./view")` 作为可选覆盖),客户端 bundle 从此自包含。
-
-**测试**
-- `test/client-render.test.js` 新增两条针对性护栏:
-  - **三态按钮断言**:`本机 / 本机+云端 / 仅云端` 必须全部渲染出来 —— 旧断言只查 `includes("本机")`,空桩也能蒙混过关;
-  - **一致性断言**:分别构造「取到 / 取不到 view 模块」两个模块实例,渲染结果必须**逐字一致**;内联实现一旦与 `view.js` 漂移立刻报红。
-  - 另断言「本机+云端」确实把云端数字并了进来(总花费 7.81 而非 5.81),防止合并逻辑退化成直通。
-- 测试脚手架修正:`renderAsync` 改为多轮 —— 切视图 → 再拉云端 → 合并是**链式** effect,只跑两轮会停在"已切视图但云端还没并进来"的中间态;结尾显式 `process.exit`(组件里的 `setInterval` 会挂住测试进程)。
-- 全量 `npm test` 通过;无数据迁移、无破坏性变更。
-
-## v1.8.2(2026-09-15)
-
-**修复**
-- **「配置完云端一点保存,插件界面整体消失」**:`client.js` 里的 `timeLabel()` 被引用 3 次却从未定义(v1.8.0 引入)。三处调用都写成 `st.lastSyncAt ? timeLabel(...) : "从未"`,因此**只有首次同步成功之后**才会执行到 —— 一保存配置、同步一成功,客户端渲染立刻抛 `ReferenceError`,`「花费统计」页与「插件配置」卡片同时消失`(实为渲染崩溃,宿主半端仍在正常运行、上报也没断)。现补上定义:一天内给「刚刚 / N 分钟前 / N 小时前」,更早给 `MM-DD HH:mm`。
-- **「仅云端 / 本机+云端」始终拿不到云端数据**:插件的云端聚合读取走 `/api/admin/*` 并用**设备令牌**鉴权,而管理接口只认管理员会话 cookie,必然 `401 UNAUTHORIZED`。现改走设备令牌可读的只读接口 `/api/v1/overview|matrix|devices`(需 dsh-cost-cloud ≥ 支持该接口的版本);命中 404 时提示「云端版本过旧」并给出升级指引,不再只回一个 `HTTP 404`。
-
-**测试**
-- `test/client-render.test.js` 的 fetch 桩改为返回**真实形态的「已配置且已同步」响应**(含 `lastSyncAt`/`watermark`/`deviceId`),并新增「上次同步时间标签必须渲染出来」断言 —— 原先喂空对象会走 `"从未"` 分支,恰好绕开了这条崩溃路径。该护栏在已发布的 1.8.0 / 1.8.1 上都会报红(`timeLabel is not defined`)。
-- 新增 `test/cloud-read.test.js`(6 项):钉住云端只读路径必须是 `/api/v1/*`、不得用设备令牌读 `/api/admin/*`、404 必须带可操作提示。
-- 全量 `npm test` 通过;无数据迁移、无破坏性变更。
-
-## v1.8.1(2026-09-15)
-
-**修复(均为 v1.8.0 的原生缺陷,建议所有 1.8.0 用户升级)**
-- **「花费统计」页白屏**:`Dashboard` 把 `sync` 作为 prop 传给 `PeakPanel`,而 `PeakPanel` 内部误用了裸 `sync`(未从 props 解构),渲染期抛 `ReferenceError: sync is not defined`,整块面板被卸载成空白 —— 1.8.0 的主页面等于完全不可用。
-- **插件配置卡片永不显示**:客户端用 `slots.entries("settings.plugin.item").length > 0` 当「宿主是否声明了该插槽」的探测。`entries` 数的是**已经注册进该插槽的条目**,而条目恰恰由各插件在插槽声明之后才注册,所以该判断在插件 apply 阶段恒为假,卡片永远注册不上(也就没有地方填写云端地址)。改为**无条件** `slots.inject`,与宿主官方卡片及 `dsh-context` 的写法一致。
-- **宿主侧命名空间注册时序**:`ctx.get('settings')` 只探一次,服务晚一步就绪时命名空间永不注册。改为 `ctx.inject(['settings'], …)` 等它就绪再注册(服务始终缺席时保持 inert,不阻断启动);`installSettingsSection` 增加幂等守卫,避免二次注册触发宿主 `already registered`。
-
-**改进**
-- **插件配置卡片改用宿主同款外壳**:`li.cost-pcard` > 可点击 header(标题 / 副标题 / 旋转箭头) + 折叠 body,逐条照搬宿主 `PluginCard.module.css` 的设计 token(边框、圆角、hover、展开态配色、focus-visible、过渡时长),默认收起、点击展开,与「插件市场 / 上下文 / 终端」等卡片视觉一致。样式用 `.cost-pcard` 前缀,避免与「花费统计」页既有的 `.cost-card`(概览数字卡)冲突。
-
-**测试**
-- 新增 `test/client-render.test.js`:用零依赖的极小 React 替身在 Node 里真实执行 `client.js`(函数组件被真正调用、`useState` 可持久化以模拟交互、`useEffect` 会执行并等微任务落地),覆盖:apply 完整、两个插槽都注册、花费统计页渲染无异常、配置卡片默认折叠 / 点击展开 / 展开后表单字段渲染。该护栏在 1.8.0 的原始代码上会红(正是上面两个缺陷)。
-- `test/client-registration.test.js` 新增「插件配置卡片注册方式」3 项断言(必须无条件 inject、条目键必须等于命名空间、必须与宿主 `installSection` 的 ns 一致)。
-
-## v1.8.0(2026-09-15)
-
-**新功能：云端同步（多机汇总）**
-- 新增 `sync.js` 同步引擎：把本机用量**增量、幂等、可离线补偿**地上报到自建云端服务。本地先记账 → 异步上报 → 失败指数退避（5s→10s→…→300s）→ 断网恢复后自动补齐。**上报失败绝不影响本地记账与看板**。
-- 去重采用**内容哈希**（与云端契约 `docs/INGEST-API.md` §6 逐位一致）：`sha256(canonical)`，重放/乱序/游标丢失后的全量重发都不会重复计数。
-- 明细带单调 `seq`（随文件持久化），云端以此推进水位；`cost_reset` 会使 `resetEpoch +1`，避免「清空后重新导入」被判为重复。
-- 明细超期折叠为日汇总时，会记录被吸收明细的 `absorbed` 键，随快照上报，云端据此把这些明细移出统计 —— 因此**全时段合计在折叠前后完全一致**。
-- 设备身份：共享文件 `~/.dsh-cost/device.json`（`machineId` / `deviceName`），可由环境变量 `DSH_COST_HOME` 覆盖目录。**同一台机器上的所有 agent 共用同一 `machineId`**，看板才会把它显示成一台设备。
-
-**新功能：看板三态视图 + 维度切换**
-- 「设置 → 花费统计」顶部新增三态开关：**本机 / 本机+云端 / 仅云端**。
-  - `本机`：与升级前逐项一致（完全走原有代码路径）；
-  - `本机+云端`：本地聚合 + 云端聚合（服务端 `excludeDevice` 排除本机后相加），恰好等于全网合计，**不重复计数**；
-  - `仅云端`：以云端记录为准；未配置或不可用时回落本机并给出横幅与数据时间戳。
-- 维度切换：合计 / 按机器 / 按 Agent / 按模型 / 按项目；`本机+云端` 下自动包含「设备 × Agent 矩阵」，行合计 = 列合计 = 总计。
-- 同步状态可见：待上报条数、水位、上次同步、错误与退避；本机有未同步记录时提示「云端数字会偏小」并提供「立即同步」。
-
-**新功能：插件配置卡（设置 → 插件 → 插件配置）**
-- 在「插件配置」标签页注册本插件卡片（`settings.plugin.item` 插槽，键为 `cost-tracker` 命名空间）：设备名、服务地址、共享令牌（写-only，浏览器拿不到明文）、同步间隔、会话脱敏、是否上报 purpose、默认视图，以及 `测试连接` / `立即同步` / `全量补传`。
-- 令牌通过 settings 的 `role('secret')` 机制脱敏（`redactSecrets: true` 派发），前端只知「是否已配置」。
-- **双保险**：「设置 → 花费统计」页保留只读回显卡（设备名/设备 ID/服务地址/同步状态），卡片未注册时功能不丢。
-- 零依赖 schema（`schema.js`）：自建与宿主 schemastery 同形状的 schema（可调用 + `.meta` + `.toJSON()`），不引入任何 npm 依赖。
-
-**新功能：Agent 工具与隐私开关**
-- 新增工具 `cost_sync`：`action = status | now | test | config`。
-- `cost_stats` 新增 `scope = local | cloud | both`（默认 `local`），避免 AI 把本机数字当成全网回答；原有输出字段保持不变。
-- 新增 `POST /api/cost-tracker/sync`、`sync-now`、`sync-test`、`sync-config`、`cloud` 路由。
-- 隐私：`会话脱敏`（`sessionId` 上报前替换为不可逆哈希）、`不含 purpose` 两个开关。
-
-**修复**
-- `store.js` 的保留期折叠现在会记录 `absorbed` 键（此前折叠后无法向云端证明"这些明细已计入快照"，会导致云端重复计数）。
-- 备份：`store.add()` 分配 `seq` 时不再依赖调用方，旧文件（无 `seq`）加载后按时间升序补配并透明落盘。
-
-**测试**
-- 新增 `test/sync.test.js`（89 项）与 `test/view.test.js`（56 项）：契约向量、身份文件、配置规范化、schema 形状、增量/批量/窗口裁剪、快照 absorbed、退避与错误分类、三态视图相加不变量，以及与 `dsh-cost-cloud` 真实实现的跨仓库端到端（本地清空后重导、全量补传去重）。
-- 既有 218 项测试全部保持通过。
-
-**兼容与升级**
-- 数据文件自动升级为 `{ v:2, seq, resetEpoch, details, rollups }`，旧文件加载时补配序号，**不影响既有数字**。
-- 配置新增字段均有默认值；未配置云端时行为与 v1.7.1 完全一致（不产生任何网络请求）。
-- 云端服务在独立仓库 `dsh-cost-cloud`，可选部署；不装也能正常使用本机统计。
-
-## v1.7.1(2026-09-14)
-
-**修复(严重,影响所有 v1.7.0 的干净安装)**
-- **修复客户端半端加载失败**:`client.js` 向浏览器端 `__ModuleLoader__.load()` 注册时用的 id 仍是旧裸名 `dsh-cost-tracker`,而加载器持有的图行 id 已是包名全称 `@angelyeye/dsh-cost-tracker`(v1.7.0 改包名时漏改了这一处手写字符串)。两者不等,加载器判定「bundle 已执行但没有以该 id 注册」并抛错:
-
-  ```
-  client-modules: bundle /plugins/??…@angelyeye/dsh-cost-tracker/client.js… loaded without
-  registering "@angelyeye/dsh-cost-tracker" via __ModuleLoader__.load
-  ```
-
-  表现为 `HARNESS / Failed to load plugins`:插件的服务端部分正常(Agent 工具仍可用),但客户端整半端(设置页「花费统计」、输入框花费状态条、侧边栏峰谷条)全部不出现。
-- **影响范围**:`npm` / 插件市场 / `github:Angelyeye/dsh-cost-tracker` / 手工 clone —— **所有**安装路径下的干净安装都会命中。图行 id 由包自己声明的 `name` 推导,与安装方式无关;v1.7.0 是此前唯一已发布版本,因此本修复针对的就是全部现存安装。
-
-**加固(防回归)**
-- `client.js` 末尾新增注册名护栏:以单一事实源常量表述注册 id,执行时自检「实际写入 `factories` 的 id」是否等于包名。**一致时不介入**(不会安装对 `loader.load` 的包装);不一致时在控制台直接点名根因 —— 若注册的是历史裸名,会明确说明这是 v1.7.0 的缺陷及改法,而不是只留加载器那句难以定位的报错。
-- 新增 `test/client-registration.test.js`(11 项断言):在 `node:vm` 沙箱里按宿主的真实注册语义运行 bundle,断言注册名严格等于 `package.json` 的 `name`、允许尾部 `/client` 写法(会被宿主的 `stripClientSuffix` 去掉)、并**反向验证**注册名不一致时护栏必须报错。已接入 `npm test`。
-
-**文档**
-- **更正 v1.7.0 条目里的迁移指引**:原文让人用 `dsh plugin --profile web add github:Angelyeye/dsh-cost-tracker` 重装 —— 该写法在 v1.7.0 上**同样无法修复**客户端加载失败(包名不变、图行 id 不变,问题在 bundle 内部)。已装坏的用户正确出路是**升级到 1.7.1**,不需要重装。中英文 README 同步更正。
-- 明确一条开发约定:**客户端 bundle 注册的 id 必须与 `package.json` 的 `name` 逐字一致**(允许尾部带 `/client`)。包名带 scope 时尤其容易漏。
-
-**升级**
-- 1.7.0 → 1.7.1 直接升级即可,**无需**先卸载;`cordis.patch.yml` 的 loader id 未变,不会产生重复注册。功能、数据格式、存储路径均无变化。
-
-## v1.7.0(2026-09-12)
-
-**变更(破坏性,仅影响安装方式,不影响功能与数据)**
-- **包名由 `dsh-cost-tracker` 改为 `@angelyeye/dsh-cost-tracker`**:npm 上原名已被他人占用,而插件市场的 npm 映射要求「已发布包名 = 仓库 `package.json` 的 `name`」并且该包的 `repository` 指回本仓库。改名后市场才能建立 npm 映射(下载量、宿主兼容徽章、版本化更新)。
-- `cordis.patch.yml` 的 bundle 补丁同步改为新包名。**注意 scoped 名在 YAML 里必须加引号**(`name: "@angelyeye/dsh-cost-tracker"`)——`@` 是 YAML 的保留起始字符,不加引号会导致整个 bundle 层解析失败。
-- **迁移**:旧安装必须**先清掉旧的、再装新的**,不能直接叠加安装 —— 新旧两份 `cordis.patch.yml` 用的是**同一个 loader id**(`dsh-cost-tracker`),叠加会让两份同时加载,表现为重复的 HTTP 路由、Agent 工具与 UI 插槽。
-  - 市场安装的(用 `dsh plugin add` 装的):`dsh plugin --profile web remove dsh-cost-tracker`,再 `dsh plugin --profile web add @angelyeye/dsh-cost-tracker`;
-  - 手工 clone 装的:删掉 `~/.dsh/profiles/web/cordis.patch.yml` 里 id 为 `dsh-cost-tracker` 的那段 `- insert:`,并 `rm -rf ~/.dsh/profiles/node_modules/dsh-cost-tracker`,然后重装一次。
-  - ~~按仓库安装的写法 `dsh plugin --profile web add github:Angelyeye/dsh-cost-tracker` 改名后依然可用(包名以包自己声明的为准)。~~ **【v1.7.1 更正】** 该写法在 v1.7.0 上同样无法修复客户端加载失败(包名不变、图行 id 不变,故障在 bundle 内部),且会让人误以为排障成功。已装坏的用户请直接升级到 v1.7.1。详见 README「从旧包名迁移」。
-- README(中/英)安装章节同步更新。
-
-**不变**
-- 功能与数据格式无变化;用量记录、日汇总、配置与存储路径均保持原样。
-
-## v1.6.0(2026-09-10)
-
-**新增**
-- **适配 V4.1 Flash 新计费规则(北京时间 2026-09-10 12:00 起生效)**:单价表改为**按「计费时代」分版**(`PRICE_ERAS`),按**每条记录自身的时间戳**选版计费,因此历史记录口径不变、切换点自动生效,无需重启或改配置。
-  - 新增时代 `v41`(北京时间 2026-09-10 12:00 = `2026-09-10T04:00:00Z`):V4.1 Flash 高峰价 **输入(缓存命中)0.04 / 输入(缓存未命中)2 / 输出 8**(元/百万 tokens),空闲时段仍为高峰半价(0.02 / 1 / 4)。**峰谷窗口不变**,故时段条与倒计时逻辑无需调整。
-  - 新增**模型路由**(时代内的 `routes`):V4.1 Pro 上线前,V4-Pro 的请求全部路由到 V4.1 Flash 并按 V4.1 Flash 单价计费;旧 V4-Flash 系(含 `deepseek-v4-flash-vision-exp`)已被 V4.1 Flash 取代,一并按新价计费。**记录以实际计费模型名入账**(如 `deepseek-v4-pro` → `deepseek-v4.1-flash`),按模型聚合看到的就是真实计费口径。
-  - 新增导出 `V41_EFFECTIVE_AT` / `V41_FLASH_MODEL` / `PRICE_ERAS` / `eraAt()` / `exactModelsAt()` / `resolveModelInEra()` / `normalizeModelName()`。
-- **模型名归一化匹配**:小写并剔除分隔符,使 `deepseek-v4.1-flash` / `deepseek-v4-1-flash` / `deepseek-v41-flash` / `DeepSeek-V4.1-Flash` 等等价写法命中同一档价,避免官方模型 ID 措辞变化导致漏计而落入兜底估算。
-- `cost_prices` 工具与 HTTP `/prices` 接口改为**按版本渲染**:逐时代列出生效时刻、单价与路由规则,并标出当前生效版本(`era` / `eraLabel` / `eras` / `v41EffectiveAt`)。
-
-- **新增 `cost_recompute` 一次性补账工具**(同时开放 HTTP `/api/cost-tracker/recompute`):按记录自身时间戳重算已入库记录的费用与计费模型名。用于「价格时代已切换、但宿主尚未重启」期间按旧价入库的记录;**默认只试算不落盘**,传 `apply: true` 才写回,幂等可重复执行。只重算明细(明细保留最近 180 天;更早的记录已折叠进日汇总,其时间段远早于任何价格切换窗口)。
-
-**变更**
-- `priceFor(np, model, ts)` 新增第三个参数 `ts`(调用发生时刻),缺省为当前时间;返回值新增 `model`(**计费模型规范名**,命中路由时为被路由到的模型)与 `era` 字段。记账链路改为传入记录时间戳。
-- DeepSeek provider 兜底单价同步至 V4.1 Flash 档(`2.0 / 8.0 / 0.04`),未知 deepseek 模型不再按旧价高估。
-- `EXACT_MODELS` 语义收敛为 **legacy(旧价)时代的单价表**,保留导出以兼容既有调用与历史口径。
-
-**测试**
-- `test/pricing.test.js` 新增计费时代分版与模型路由用例(切换边界 11:59:59 / 12:00:00、V4-Pro 路由、旧 V4-Flash 系路由、别名归一化、空闲半价、悬空路由防护)。
-- 所有涉及单价的断言改为**显式传入时间戳**,不再随运行时刻漂移(否则跨 12:00 切换后必然误报)。
-
-**计费影响(同一调用对比,高峰价)**
-- V4-Pro(10 万输入未命中 + 6 千输出 + 2 万缓存命中):旧 **¥1.068** → 新 **¥0.2488**(约 **-76.7%**)。
-- 旧 V4-Flash 同量:旧 **¥0.356** → 新 **¥0.2488**(约 **-30.1%**)。
-
-## v1.5.2(2026-08-25)
-
-### 新增
-- **「简洁」时段条新增「双行紧凑（上下布局）」选项**:设置页当时段条样式为「简洁（单行紧凑）」时出现该复选项,勾选后时段条由左右单行改为上下两行布局,并可进一步选择「时段条在上·文字在下」(默认)或「文字在上·时段条在下」;侧边栏与设置页预览同步生效。
-- 新增 `peakCompactStack`(默认 `false`)与 `peakCompactOrder`(`bar-first` / `text-first`,默认 `bar-first`)配置项,纳入 `defaultPeakConfig` / `normalizePeakConfig` 与配置层单元测试。
-
----
-
-## v1.5.1(2026-08-24)
-
-### 修复
-- **侧边栏底部(sidebar.footer.action)与多插件 UI 兼容**:DSH 渲染器把该槽锚点设为 `display:contents`(见 `dsh-client-ui-renderer` 的 `ANCHOR_STYLE`),导致多个往此槽注册内容的插件(如 `linxin666/dsh-web-ui-all`)被并进同一行、互相挤压。现通过覆盖样式把该锚点改为**纵向堆叠**(`display:flex; flex-direction:column`),使本插件的时段条与其它 footer 插件共存不重叠(思路与 `dsh-footer-order` 一致)。采用稳定 `data-slot` 选择器,收起(rail)态仅显示短词、天然不受影响。
-
----
-
-## v1.5.0(2026-08-24)
-
-### 新增
-- **峰谷「时段条样式」新增「环形表盘(24h 中空圆环)」**(替代原「经典(两行)」):
-  - 12 档「当前时刻」指针式样可选,默认采用**相位色点**(圆点颜色随相位变化:高峰橙 / 平价蓝 / 周末绿),不再使用从圆心连到边缘的长指针;
-  - 圆环按 24h 划分(0:00 顶部、6:00 右、12:00 底、18:00 左),橙色 = 高峰时段(9:00–12:00、14:00–18:00),蓝色 = 平价时段,周末整环无橙色(全天谷价);
-  - 圆心展示当前相位词 + 距下次切换倒计时;
-  - 新增「显示时间」开关(仅环形表盘)控制是否显示 00:00–21:00 小时刻度。
-- **「简洁(单行紧凑)」时段条改为按 24h 比例划分**:蓝色平价底条铺满 24h,橙色高峰段按窗口比例定位(9:00–12:00 → 37.5%–50%,14:00–18:00 → 58.33%–75%),白色分割线标出「当前时间」实时进度;周末仅蓝底 + 白线。
-
-### 改进
-- 后端 `peakSnapshot()` 新增下发结构化窗口数组 `peakHours`(`PEAK_HOUR_WINDOWS`),前端据此绘制比例轨道 / 圆弧,与 `isPeak`/`peakPhaseAt` 计费口径一致;前端内置兜底窗口 `[9,12]`/`[14,18]`。
-- 新增 `peakShowTickLabels` 配置项(默认 `true`),纳入 `defaultPeakConfig` / `normalizePeakConfig`。
-- 新增设计文档 `docs/peak-dial-design.md` 与可交互预览页 `docs/peak-dial-preview.html`(含 12 档指针式样对比)。
-
----
-
-## v1.4.1(2026-08-23)
-
-### 修复
-- **修复缓存写入(cache write)计价 bug**:原先 `cacheWrite` 被按「缓存未命中价」计费(flash 3.0 / pro 9.0),导致缓存写入量大的会话费用被严重高估。官方规则(及 `dsh-cost-meter`)约定**缓存写入与缓存命中同价**,现统一为 `(cacheRead + cacheWrite) × 缓存命中价`(flash 0.10 / pro 0.30)。
-- `computeCost()` 改为 `输入×未命中价 + 输出×输出价 + (缓存读+缓存写)×命中价`,与官方/参考口径完全一致。
-- **补充 reasoning(推理)token 计费**:`normalizeTokens()` 新增 `reasoning` 桶(读 `usage.reasoningTokens`),模型单价含 `reasoning` 时按单独单价计费(DeepSeek 当前模型未单独列 reasoning 价,计 0)。
-
-### 改进
-- 同步 `EXACT_MODELS` / `SUBSCRIPTION_RATES` / `PROVIDER_RATES` / `GENERIC_RATES` 的 cacheWrite 值(均改为命中价)。
-- 更新 `cost_prices` 工具文案与单元测试(新增「缓存写入按命中价」与「reasoning 计费」用例)。
-
-> 说明:本版只修正**单模型计价规则**;不同插件间「调用次数 / 累计用量」的差异源自统计口径(实时 `llm/stream` 与 DSH 会话投影 `(turn,step)` 粒度不同),不属于计价 bug。
-
----
-
-## v1.4.0(2026-08-23)
-
-### 新增
-- **峰谷计价提示(对标 dsh-cost-meter)**:
-  - 设置页新增「峰谷计价与提示」面板:启用 DeepSeek 峰谷时段价格、峰时高价时段显著提示、时段条样式(简洁/经典)、峰/谷切换前弹窗提醒、提前提醒分钟(1–30)、提醒类型(峰和谷/进入峰/进入谷)、弹窗位置(右下角/屏幕中心)、同步发送系统通知;全部设置即时保存到 `~/.dsh/storages/cost-tracker-config.json`;
-  - 侧边栏底部常驻显示时段条(当前档位 + 距下次切换倒计时),窄栏(rail)自适应为短词;悬停可见完整说明;
-  - 峰/谷切换前弹窗:距下次切换不足设定提前量时弹出,同一切换点只提醒一次;可一键预览(进入峰 / 进入谷);
-  - 浏览器系统通知:开启且有通知授权时,同一切换点额外发一条;
-  - 新增 `POST /api/cost-tracker/peak`(峰谷相位快照)与 `POST /api/cost-tracker/peak-config`(保存配置),以及 Agent 工具 `cost_peak`。
-- **六组概览卡**:设置页顶部改版为六张卡——今日费用 / 本月费用 / 总花费 / API 请求次数 / Tokens / **总余额**。今日、本月、总花费三个金额卡**不含订阅会员等效费用**(订阅以附注展示);本月按北京日历月统计;总花费为全时段累计(明细 + 永久日汇总,永远精确)。
-
-### 改进
-- **同步 DeepSeek 最新定价规则**:高峰时段限定为北京时间**周一至周五 9:00–12:00、14:00–18:00**,**周末全天计为闲时(闲时半价)**;`isPeak()` 不再忽略星期几,修复周末高峰窗口内被误判为高峰价的问题。
-- 时段条对齐参考项目样式:两段轨道(左橙右蓝)+ 标记线 + 单行着色 chip,窄栏自适应;倒计时文案改为紧凑格式(`5小时56分后进入高峰`)。
-
-### 修复
-- 预览弹窗此前强制居中显示,现已**跟随用户配置的弹窗位置**(右下角/屏幕中心)。
-
----
-
-## v1.3.0(2026-08-23)
-
-### 新增
-- **Token 用量统计热力图**:
-  - 设置页新增「Token 用量统计」面板,类 Codex 的 **26 周每日用量方格热图**;
-  - 颜色深浅按当日 token 相对最大值分 4 档,网格自动铺满设置页宽度;
-  - 悬停任一格显示当日明细(日期 / 输入 / 缓存 / 输出 / 费用),今天高亮描边;
-  - 顶部显示全时段累计(`累计 X tokens · 输入 · 缓存 · 输出 · N 次调用`);
-  - 新增 `POST /api/cost-tracker/usage` 端点,返回全时段累计 + 按天 token 聚合;
-  - 日期键统一按北京时间(UTC+8)生成,与服务端口径完全一致。
-- **本会话按模型拆分**:状态栏新增按会话实际使用的模型拆分,订阅与按量分开统计。
-
-### 改进
-- **状态栏改版**:改为**胶囊分段**布局(本会话 / 订阅套餐 / 分模型),信息清晰、竖线分隔、基线对齐。
-- **只显示本会话花费**:不再显示累计金额,也不再显示当前峰/闲时价。
-- **订阅去重**:订阅只显示一个着色徽标(具体套餐名 + 总等效费用),不再在模型区重复出现。
-- **多模型折叠**:默认只显示消耗 top2 模型 + 数量,点击 `▸` 展开全部模型明细;订阅模型不再混入模型区。
-- **显示精简**:去掉配额(周配额剩)与模型调用次数(`×N`)等噪音信息。
-- **视觉统一**:金额字重与配色统一,与整体主题一致。
-
-### 修复
-- 状态栏不再依赖"当前选中的模型"判定显示,而是**按会话实际用到的模型 / 订阅**决定,修复多会话切换时显示错误、订阅会话显示为 ¥0 的问题。
-- 热力图悬停浮层在格子靠近左 / 右 / 顶边界时自适应定位,不再被容器裁剪。
-
----
-
-## v1.2.0(此前)
-
-- 支持视觉模型 (`deepseek-v4-flash-vision-exp`) 定价;
-- 订阅计费修复;
-- 新增启动日志开关;
-- 新增三套图表配色(橙→黄 / 蓝→紫 / 蓝→浅蓝)。
+- Upstream pricing, accounting, persistence format, token normalization, cloud engine, and host API logic remain based on the audited upstream `1.8.8` baseline unless explicitly changed above.

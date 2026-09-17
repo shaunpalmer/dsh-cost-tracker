@@ -1,30 +1,31 @@
 // ============================================================
-// DSH 花费统计插件 —— 三态视图数据归一（纯逻辑，可独立测试）
+// DSH cost tracker — three-state view normalization.
 //
-// 看板顶部三态开关：本机 / 本机+云端 / 仅云端。
-// 这里只做「形状归一 + 相加」，不涉及渲染：
-//   · normalizeCloudDash：云端返回补齐成本地 buildDashboard 形状（缺字段按 0）
-//   · mergeDash：本地 + 云端(excludeSelf) 相加，字段逐一合并
+// Dashboard source modes: Local / Local + Cloud / Cloud Only.
+// This module handles shape normalization and merging only; it does not render UI.
+//   - normalizeCloudDash: fills cloud responses into the local buildDashboard shape.
+//   - mergeDash: combines local and cloud data field-by-field.
 //
-// 关键不变量：服务端已按 excludeDevice 排除了本机，因此
-//   mergeDash(本地, 云端_排除本机) === 全网合计（且本机恰好计一次）
+// Key invariant: the server-side cloud-rest view already excludes this machine's
+// DSH source, so mergeDash(local, cloudWithoutSelf) equals the global total while
+// counting this machine exactly once.
 //
-// 该文件同时以浏览器 ModuleLoader bundle 形式注册（供 client.js require），
-// 并以 ESM 命名导出（供 node 测试直接 import）。两种形态共用同一份实现。
+// The same implementation is exported as ESM for Node tests and registered as a
+// browser ModuleLoader bundle for the DSH client.
 // ============================================================
 
 export const BOARD_VIEWS = [
-	{ id: "local", label: "本机" },
-	{ id: "local+cloud", label: "本机+云端" },
-	{ id: "cloud", label: "仅云端" },
+	{ id: "local", label: "Local" },
+	{ id: "local+cloud", label: "Local + Cloud" },
+	{ id: "cloud", label: "Cloud Only" },
 ];
 
 export const BOARD_DIMS = [
-	{ id: "total", label: "合计" },
-	{ id: "device", label: "按机器" },
-	{ id: "agent", label: "按 Agent" },
-	{ id: "model", label: "按模型" },
-	{ id: "project", label: "按项目" },
+	{ id: "total", label: "Total" },
+	{ id: "device", label: "By Device" },
+	{ id: "agent", label: "By Agent" },
+	{ id: "model", label: "By Model" },
+	{ id: "project", label: "By Project" },
 ];
 
 export function zeroSlice() { return { real: 0, calls: 0, tokens: 0, sub: 0, subCalls: 0, subTokens: 0 }; }
@@ -44,9 +45,9 @@ export function addSlice(a, b) {
 }
 
 /**
- * 云端切片的字段名映射：概览口径用 `realCost` / `subEquivalent`，
- * 插件形状口径（/api/v1/plugin-view）用 `real` / `sub`，这里统一成本地口径。
- * 缺字段一律 0，避免渲染时报错。
+ * Map cloud slice field names to the local shape. Overview responses use
+ * `realCost` / `subEquivalent`, while `/api/v1/plugin-view` uses `real` / `sub`.
+ * Missing fields are treated as zero so rendering remains safe.
  */
 export function cloudSlices(cloud) {
 	const pick = (s) => {
@@ -91,11 +92,14 @@ export function cloudSlices(cloud) {
 	};
 }
 
-/** 把云端返回补齐成本地 buildDashboard 形状（缺字段一律 0，避免渲染时报错）
+/**
+ * Normalize a cloud response to the local buildDashboard shape.
  *
- *  ⚠️ 必须**逐项映射金额字段**：云端叫 `realCost` / `subEquivalent`，本地卡片读 `real` / `sub`。
- *  此前只透传 today/month/all 的原字段，金额显示 ¥0.0000（次数因同名而正常）——
- *  这就是「仅云端只有次数没有费用」的根因。 */
+ * Cost fields must be mapped explicitly. Cloud responses call them `realCost`
+ * and `subEquivalent`, while local cards read `real` and `sub`. Earlier versions
+ * passed the original fields through unchanged, which produced zero-value cost
+ * cards even though call and token counts were correct.
+ */
 export function normalizeCloudDash(cloud, fallbackDays) {
 	if (!cloud || cloud.ok === false) return null;
 	const s = cloudSlices(cloud);
@@ -116,7 +120,7 @@ export function normalizeCloudDash(cloud, fallbackDays) {
 	});
 }
 
-/** 合并两份 buildDashboard 形状的数据（本地 + 云端） */
+/** Merge two buildDashboard-shaped datasets (local + cloud). */
 export function mergeDash(local, cloud) {
 	if (!local) return cloud;
 	if (!cloud) return local;
@@ -137,7 +141,8 @@ export function mergeDash(local, cloud) {
 	};
 	for (const m of (local.byModel || [])) addModel(m);
 	for (const m of (cloud.byModel || [])) addModel(m);
-	// byModelDay：以日期为并集键合并，保证图表按天轴拼得上
+
+	// Merge per-model daily rows by date so chart axes stay aligned.
 	const byModelDayMap = new Map();
 	const addModelDay = (m) => {
 		const cur = byModelDayMap.get(m.model) || { model: m.model, subscription: !!m.subscription, estimated: !!m.estimated, days: new Map() };
@@ -180,12 +185,12 @@ export function mergeDash(local, cloud) {
 }
 
 // ------------------------------------------------------------
-// 浏览器 bundle 注册（client.js 通过 require("./view") 取用）
+// Browser bundle registration. client.js obtains this through require("./view").
 // ------------------------------------------------------------
 /* istanbul ignore next */
 if (typeof window !== "undefined" && window.__ModuleLoader__ && typeof window.__ModuleLoader__.load === "function") {
 	window.__ModuleLoader__.load({
-		id: "@angelyeye/dsh-cost-tracker/view",
+		id: "@shaunpalmer/dsh-cost-tracker/view",
 		factory: () => ({
 			BOARD_VIEWS, BOARD_DIMS, zeroSlice, addSlice, r2, normalizeCloudDash, mergeDash, cloudSlices,
 		}),

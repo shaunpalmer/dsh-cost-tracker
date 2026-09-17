@@ -1,12 +1,11 @@
-# dsh-cost-tracker bundle patch: registers the plugin when installed via
-# `dsh plugin add @angelyeye/dsh-cost-tracker` (or from this repo directly).
+# DSH cost tracker bundle patch.
 #
-# 注意两个 id 是两回事,不要混改:
-#   - 下面的 `id: dsh-cost-tracker` 是 loader 条目 id,用于新旧版本互斥。
-#     它自 v1.6.0 起就没变,改了会与旧版补丁 id 不同,导致两份同时加载
-#     (重复的 HTTP 路由、Agent 工具与 UI 插槽)。
-#   - 客户端 bundle 的注册 id 必须是包名全称(见 client.js 的 __ModuleLoader__.load),
-#     与这里的 loader id 无关。
+# Keep the loader entry id as `dsh-cost-tracker`. It is intentionally stable so
+# an older installation and this fork cannot register two copies of the host
+# routes, tools, and UI slots at the same time.
+#
+# The package name below is the installable Project Studios identity. The active
+# browser bundle registers the same fully scoped package id in `client.js`.
 - insert:
     - id: dsh-cost-tracker
-      name: "@angelyeye/dsh-cost-tracker"
+      name: "@shaunpalmer/dsh-cost-tracker"

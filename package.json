@@ -1,10 +1,11 @@
 {
-  "name": "@angelyeye/dsh-cost-tracker",
-  "version": "1.8.8",
-  "description": "DeepSeek Harness (DSH) plugin: LLM token usage & cost tracking with a settings dashboard, agent tools, HTTP API, persistent storage and multi-device cloud sync.",
+  "name": "@shaunpalmer/dsh-cost-tracker",
+  "version": "1.8.8-ps.2",
+  "description": "Project Studios hardened English fork of the DSH token usage and cost tracker.",
   "type": "module",
-  "main": "index.js",
+  "main": "index.safe.js",
   "files": [
+    "index.safe.js",
     "index.js",
     "client.js",
     "view.js",
@@ -14,16 +15,17 @@
     "schema.js",
     "sync.js",
     "cordis.patch.yml",
+    "HARDENING.md",
     "CHANGELOG.md"
   ],
   "exports": {
-    ".": "./index.js",
+    ".": "./index.safe.js",
     "./client": "./client.js",
     "./view": "./view.js",
     "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "node test/storage.test.js && node test/pricing.test.js && node test/config.test.js && node test/recompute.test.js && node test/client-registration.test.js && node test/client-render.test.js && node test/cloud-read.test.js && node --no-warnings test/cloud-view-e2e.test.js && node test/sync.test.js && node test/view.test.js"
+    "test": "node test/storage.test.js && node test/pricing.test.js && node test/config.test.js && node test/recompute.test.js && node test/cloud-read.test.js && node --no-warnings test/cloud-view-e2e.test.js && node test/sync.test.js && node test/view.test.js && node test/project-studios-hardening.test.js"
   },
   "keywords": [
     "dsh-plugin",
@@ -32,7 +34,8 @@
     "cordis",
     "llm",
     "token-usage",
-    "cost-tracking"
+    "cost-tracking",
+    "project-studios"
   ],
   "license": "MIT",
   "engines": {
@@ -40,7 +43,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Angelyeye/dsh-cost-tracker.git"
+    "url": "git+https://github.com/shaunpalmer/dsh-cost-tracker.git"
   },
   "dsh": {
     "bundle": {
