@@ -75,6 +75,21 @@ window.__ModuleLoader__.load({
       return '¥' + formatMoney(value) + ' CNY'
     }
 
+    // A balance that is not in CNY must not be labelled or converted as CNY.
+    // The Frankfurter reference rate is CNY -> NZD, so it only applies to a CNY balance.
+    function currencyLabel(value, currency) {
+      const cur = String(currency || 'CNY').toUpperCase()
+      if (cur === 'CNY') return cnyLabel(value)
+      const symbol = cur === 'USD' ? '$' : ''
+      return symbol + formatMoney(value) + ' ' + cur
+    }
+
+    function balanceLabels(value, currency, fxRate) {
+      const cur = String(currency || 'CNY').toUpperCase()
+      if (cur !== 'CNY') return { primary: currencyLabel(value, cur), secondary: '' }
+      return moneyLabels(value, fxRate)
+    }
+
     function moneyLabels(value, fxRate) {
       const cny = Number(value) || 0
       if (!isValidFxRate(fxRate)) {
@@ -257,7 +272,7 @@ window.__ModuleLoader__.load({
       let balanceValue = '—'
       let balanceSub = 'Balance lookup unavailable'
       if (balance && balance.ok) {
-        const balanceMoney = moneyLabels(balance.total, fx.rate)
+        const balanceMoney = balanceLabels(balance.total, balance.currency, fx.rate)
         balanceValue = balanceMoney.primary
         balanceSub = (balance.available ? 'Available' : 'Unavailable') + (balanceMoney.secondary ? ' · ' + balanceMoney.secondary : '')
       } else if (balance && balance.error) {
