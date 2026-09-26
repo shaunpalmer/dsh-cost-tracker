@@ -471,9 +471,10 @@ export default {
         if (r.status !== 200 || !r.body) return { ok: false, error: 'HTTP ' + (r.status || 0) + (r.error ? ' · ' + r.error : ''), available: false, total: '', granted: '', toppedUp: '', currency: 'CNY', keySource: key.source }
         const j = JSON.parse(r.body)
         const infos = Array.isArray(j.balance_infos) ? j.balance_infos : []
-        let info = null
-        for (const b of infos) { if (b && b.currency === 'CNY') { info = b; break } }
-        if (!info) info = infos[0] || {}
+        // DeepSeek returns the account's own billing currency. Do NOT prefer CNY:
+        // on a USD account that picks a balance in the wrong currency, which the
+        // client then converts with the CNY -> NZD rate.
+        const info = infos[0] || {}
         return { ok: true, error: '', available: !!j.is_available, total: toStr(info.total_balance), granted: toStr(info.granted_balance), toppedUp: toStr(info.topped_up_balance), currency: toStr(info.currency) || 'CNY', keySource: key.source }
       } catch (e) {
         return { ok: false, error: toStr(e && e.message ? e.message : e), available: false, total: '', granted: '', toppedUp: '', currency: 'CNY', keySource: key.source }
